@@ -39,10 +39,15 @@ partial state is ever observable.
 
 ## `CowFlashLoanWrapper` invariants
 
-1. **Success ⇒ real settlement.** The solver declares the order UID(s) the loan funds; the wrapper
-   snapshots `filledAmount(uid)` before the loan and requires a strict increase afterward. Only `settle`
-   moves `filledAmount`, so a fake downstream wrapper (returning the magic value without settling), a
-   pool that skips the callback, or a substituted chain all fail and revert.
+1. **Trampoline data integrity (no injected settlement).** `wrapperData = abi.encode(Loan[])` only —
+   no solver-supplied order UIDs. Before borrowing, `_wrap` commits `keccak256` of the full context
+   (settle calldata + the rest of the chain + the loan-delivery plan) to transient storage; the Aave
+   callback re-hashes the `params` it is handed and reverts (`ParamsTampered`) on any mismatch. So the
+   settlement can ONLY be driven by the exact bytes the solver passed to `wrappedSettle` — a
+   malicious/upgraded pool cannot substitute the settle calldata or redirect loan delivery. The terminal
+   hop is additionally constrained to the `settle()` selector. This mirrors CoW's audited FlashLoanRouter
+   (`pendingDataHash`). Keeping `wrapperData` UID-free also makes it complete and final inside an order's
+   appData `metadata.wrappers`, so a wrapper-aware solver's verbatim chain encoding fills correctly.
 2. **Callback authenticity.** `executeOperation` requires `msg.sender == Pool`, `initiator == this` (a
    third-party-initiated loan with this contract as receiver reverts), and an in-flight transient flag.
 3. **Atomic repayment / statelessness.** No owner, no registry; it holds no funds between transactions.
@@ -51,21 +56,25 @@ partial state is ever observable.
    per-asset premium comes from the pool.
 4. **No nesting of itself** (transient guard) and **no duplicate loan assets** (rejected) keep the
    accounting unambiguous.
+5. **Fill-correctness is not this layer's job.** The flash wrapper is a generic liquidity primitive and
+   deliberately does NOT verify that the downstream filled anything (a downstream that repays the loan
+   and returns the magic value succeeds at this layer). The user's order is still protected: when the
+   chain ends in `CoWSafeWrapper`, that wrapper independently enforces `filledAmount >= expectedFill`, so
+   no fill can be faked on a user's Safe.
 
 > Do **not** send tokens to `CowFlashLoanWrapper` — it is stateless with no recovery path; stray tokens
 > are inert (they cannot subsidize a repayment and cannot be swept).
 
 ## Known assumptions / limitations
 
-- **Standard ERC-20 tokens.** Delivery (`transfer`) and repayment (`approve`) check the boolean return,
-  so loan tokens must be standard, boolean-returning ERC-20s. The Gnosis tokens this is deployed for
-  (WXDAI, WETH, USDC.e, wstETH) qualify. Non-standard tokens (no return value, approve-from-nonzero
-  restrictions, fee-on-transfer, rebasing) are out of scope and would revert — a `SafeERC20`/`forceApprove`
-  hardening is a clean follow-up for broader multi-chain use.
+- **ERC-20 compatibility.** Delivery and repayment go through an internal `SafeTransfer` library
+  (`safeTransfer` / `forceApprove`) that tolerates non-standard tokens which return no data (e.g. USDT)
+  and resets a non-zero allowance to 0 before re-approving. Fee-on-transfer and rebasing tokens remain
+  out of scope (the loan-accounting assumes the delivered/repaid amount equals the requested amount).
 - **Canonical Aave pool / CoW settlement.** The immutable `POOL` and `SETTLEMENT` addresses are assumed
-  canonical. The flash wrapper's proof-of-settle does not over-rely on the pool (it checks settlement
-  state directly), but a maliciously-upgraded pool proxy is outside the threat model, as for any flash
-  integration.
+  canonical. The flash wrapper's trampoline binding means even a misbehaving pool cannot substitute the
+  settle calldata or redirect delivery (the callback `params` are hash-checked), but a maliciously-upgraded
+  pool proxy is otherwise outside the threat model, as for any flash integration.
 
 ## How these are tested
 
@@ -75,8 +84,8 @@ partial state is ever observable.
 - multi-order / multi-Safe batches;
 - adversarial negatives: non-solver caller, unregistered/duplicate/replayed nonce, tampered pre/post,
   direct-`settle` bypass, EIP-1271 outside the window, non-final-wrapper chaining, third-party flash
-  callback, direct `executeOperation`, unrepaid loan, and a **fake downstream that returns the magic
-  value but never settles** (the proof-of-settle check).
+  callback, direct `executeOperation`, unrepaid loan, and a fake downstream that returns the magic value
+  without settling (which succeeds at the flash layer by design — fill is enforced by `CoWSafeWrapper`).
 
 ## Reporting
 

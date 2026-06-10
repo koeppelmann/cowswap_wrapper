@@ -4,30 +4,35 @@ pragma solidity 0.8.34;
 import {CowWrapper, ICowSettlement, ICowWrapper} from "./CowWrapper.sol";
 
 /*
- * CowFlashLoanWrapper — a flash-loan layer for CoW wrapper chains, gated on REAL settlement.
+ * CowFlashLoanWrapper — a flash-loan layer for CoW wrapper chains.
  *
  * Placed FIRST in a wrapper chain, it takes an Aave V3 flash loan and runs the REST of the chain
  * (e.g. CoWSafeWrapper → settle) INSIDE the loan window, so downstream pre/post logic and the
  * settlement itself can use the borrowed liquidity; repayment happens when the chain returns.
  *
  *   solver → wrappedSettle(settleData, chain)
- *     _wrap:  snapshot filledAmount(uid) for each declared order
- *             POOL.flashLoan(...)
- *                executeOperation:  deliver loans → _nextMem(...) → … → settle → repay
- *             require filledAmount(uid) STRICTLY INCREASED for every declared order   ← proof of settle
+ *     _wrap:  commit keccak256(ctx) to transient storage   ← TRAMPOLINE binding
+ *             POOL.flashLoan(...) with ctx as params
+ *                executeOperation:  require keccak256(params) == commit   ← reject injected data
+ *                                   deliver loans → _nextMem(...) → … → settle → repay
  *
- * SUCCESS ⇒ REAL SETTLEMENT. The wrapper only returns the wrapper magic value if a genuine
- * GPv2Settlement.settle filled every order UID the solver declared in `wrapperData`. Only `settle`
- * can move `filledAmount`, so a fake downstream wrapper (returning the magic value without settling),
- * a pool that skips the callback, or a pool that substitutes the chain all fail this check and revert
- * the whole transaction. This closes the "fake success without settlement" class.
+ * TRAMPOLINE / DATA-INTEGRITY (the security hinge). The Aave callback (`executeOperation`) receives
+ * its `params` from the pool, which is data that crossed an external-call boundary. We do NOT trust it:
+ * before the loan, `_wrap` stores keccak256 of the context (settleData + the rest of the chain + the
+ * loan delivery plan) in transient storage; the callback re-hashes the `params` it was handed and
+ * requires an exact match. So the settlement can ONLY ever be driven by the bytes the solver passed to
+ * `wrappedSettle` — a malicious/upgraded pool cannot substitute the settle calldata or redirect loan
+ * delivery. The final hop is additionally constrained to the `settle()` selector (in `_nextMem`). This
+ * mirrors CoW's audited FlashLoanRouter (`pendingDataHash`).
  *
- * It is otherwise STATELESS with NO registry/owner: a loan that can't be repaid simply reverts. It is
- * expected to hold zero balance between transactions; do not send it tokens (there is no recovery).
+ * It is STATELESS with NO registry/owner: a loan that can't be repaid simply reverts. It is expected to
+ * hold zero balance between transactions; do not send it tokens (there is no recovery).
  *
- * wrapperData = abi.encode(Loan[] loans, bytes[] uids)
- *   loans : which tokens/amounts to flash-borrow and where to deliver them
- *   uids  : the 56-byte CoW order UID(s) that this settlement MUST fill (≥1)
+ * NOTE: it deliberately does NOT verify that the downstream actually filled an order. Fill-correctness
+ * is enforced where it belongs — `CoWSafeWrapper` independently requires `filledAmount >= expectedFill`
+ * for the user's order — so this layer stays a generic liquidity primitive.
+ *
+ * wrapperData = abi.encode(Loan[] loans)   // tokens/amounts to flash-borrow and where to deliver them
  */
 
 interface IAavePoolFL {
@@ -41,11 +46,34 @@ interface IERC20Min {
     function approve(address spender, uint256 amount) external returns (bool);
     function balanceOf(address account) external view returns (uint256);
 }
-interface ISettlementFilled {
-    function filledAmount(bytes calldata orderUid) external view returns (uint256);
+
+/// @dev Minimal SafeERC20: tolerates non-standard tokens that return no data (e.g. USDT) and treats a
+///      `false` return or revert as failure. `forceApprove` resets to 0 first for tokens that disallow a
+///      non-zero→non-zero allowance change. Avoids pulling in an external dependency.
+library SafeTransfer {
+    function safeTransfer(address token, address to, uint256 amount) internal {
+        _call(token, abi.encodeWithSelector(IERC20Min.transfer.selector, to, amount), "transfer");
+    }
+    function forceApprove(address token, address spender, uint256 amount) internal {
+        if (!_tryApprove(token, spender, amount)) {
+            _call(token, abi.encodeWithSelector(IERC20Min.approve.selector, spender, uint256(0)), "approve reset");
+            _call(token, abi.encodeWithSelector(IERC20Min.approve.selector, spender, amount), "approve");
+        }
+    }
+    function _tryApprove(address token, address spender, uint256 amount) private returns (bool) {
+        (bool ok, bytes memory ret) =
+            token.call(abi.encodeWithSelector(IERC20Min.approve.selector, spender, amount));
+        return ok && (ret.length == 0 || abi.decode(ret, (bool)));
+    }
+    function _call(address token, bytes memory data, string memory err) private {
+        (bool ok, bytes memory ret) = token.call(data);
+        require(ok && (ret.length == 0 || abi.decode(ret, (bool))), err);
+    }
 }
 
 contract CowFlashLoanWrapper is CowWrapper {
+    using SafeTransfer for address;
+
     uint256 internal constant MAX_LOANS = 8;
 
     IAavePoolFL public immutable POOL;
@@ -55,10 +83,13 @@ contract CowFlashLoanWrapper is CowWrapper {
 
     // transient: 1 while a wrappedSettle-initiated flash loan is in flight
     bytes32 private constant T_FL = keccak256("CowFlashLoanWrapper.FL");
+    // transient: keccak256 of the FlashCtx params committed by _wrap (the trampoline binding)
+    bytes32 private constant T_COMMIT = keccak256("CowFlashLoanWrapper.COMMIT");
 
     error NotPool();
     error NotSelfInitiated();
     error NotInWrappedSettle();
+    error ParamsTampered();
 
     constructor(ICowSettlement settlement_, IAavePoolFL pool_) CowWrapper(settlement_) {
         POOL = pool_;
@@ -69,9 +100,8 @@ contract CowFlashLoanWrapper is CowWrapper {
 
     /// @inheritdoc ICowWrapper
     function validateWrapperData(bytes calldata wrapperData) external pure override {
-        (Loan[] memory loans, bytes[] memory uids) = abi.decode(wrapperData, (Loan[], bytes[]));
+        Loan[] memory loans = abi.decode(wrapperData, (Loan[]));
         require(loans.length > 0 && loans.length <= MAX_LOANS, "loans");
-        require(uids.length > 0 && uids.length <= MAX_LOANS, "uids");
     }
 
     /// @inheritdoc CowWrapper
@@ -80,29 +110,20 @@ contract CowFlashLoanWrapper is CowWrapper {
         override
     {
         require(_tload(T_FL) == 0, "reentrant");
-        (Loan[] memory loans, bytes[] memory uids) = abi.decode(wrapperData, (Loan[], bytes[]));
-        require(uids.length > 0 && uids.length <= MAX_LOANS, "uids");
+        Loan[] memory loans = abi.decode(wrapperData, (Loan[]));
 
         FlashCtx memory c = _buildCtx(settleData, remainingWrapperData, loans);
 
-        // snapshot each declared order's fill BEFORE the loan
-        uint256[] memory filledBefore = new uint256[](uids.length);
-        for (uint256 j = 0; j < uids.length; j++) {
-            filledBefore[j] = ISettlementFilled(address(SETTLEMENT)).filledAmount(uids[j]);
-        }
-
+        // TRAMPOLINE: commit the exact context the callback must run with, then start the loan.
+        bytes memory params = abi.encode(c);
+        _tstore(T_COMMIT, uint256(keccak256(params)));
         _tstore(T_FL, 1);
         POOL.flashLoan(
             address(this), c.assets, c.amounts, new uint256[](c.assets.length) /* modes: pure flash */,
-            address(this), abi.encode(c), 0
+            address(this), params, 0
         );
         _tstore(T_FL, 0);
-
-        // PROOF OF SETTLE: only GPv2Settlement.settle can move filledAmount — require every declared
-        // order strictly increased, else the whole tx reverts. This is what makes "success" mean "settled".
-        for (uint256 j = 0; j < uids.length; j++) {
-            require(ISettlementFilled(address(SETTLEMENT)).filledAmount(uids[j]) > filledBefore[j], "no settle");
-        }
+        _tstore(T_COMMIT, 0);
     }
 
     function _buildCtx(bytes calldata settleData, bytes calldata remaining, Loan[] memory loans)
@@ -125,8 +146,9 @@ contract CowFlashLoanWrapper is CowWrapper {
     }
 
     /// @notice Aave V3 flash-loan callback. Only callable by the pool, only for loans this wrapper
-    ///         itself initiated from an in-flight wrappedSettle. All delivery/repayment uses the
-    ///         context WE encoded (c.*) — only the per-asset `premiums` come from the pool.
+    ///         itself initiated from an in-flight wrappedSettle, and only with the EXACT params the
+    ///         entry point committed (the trampoline check). All delivery/repayment uses that context;
+    ///         only the per-asset `premiums` come from the pool.
     function executeOperation(
         address[] calldata /*assets*/,
         uint256[] calldata /*amounts*/,
@@ -137,13 +159,15 @@ contract CowFlashLoanWrapper is CowWrapper {
         require(msg.sender == address(POOL), NotPool());
         require(initiator == address(this), NotSelfInitiated());
         require(_tload(T_FL) == 1, NotInWrappedSettle());
+        // TRAMPOLINE binding: the only data we will act on is what _wrap committed.
+        require(uint256(keccak256(params)) == _tload(T_COMMIT), ParamsTampered());
 
         FlashCtx memory c = abi.decode(params, (FlashCtx));
         require(premiums.length == c.assets.length, "len");
 
-        // deliver the borrowed liquidity to each declared recipient
+        // deliver the borrowed liquidity to each committed recipient
         for (uint256 i = 0; i < c.assets.length; i++) {
-            require(IERC20Min(c.assets[i]).transfer(c.recipients[i], c.amounts[i]), "deliver");
+            c.assets[i].safeTransfer(c.recipients[i], c.amounts[i]);
         }
 
         // run the rest of the wrapper chain (→ … → GPv2Settlement.settle) inside the loan window
@@ -153,12 +177,13 @@ contract CowFlashLoanWrapper is CowWrapper {
         for (uint256 i = 0; i < c.assets.length; i++) {
             uint256 due = c.amounts[i] + premiums[i];
             require(IERC20Min(c.assets[i]).balanceOf(address(this)) >= due, "underfunded");
-            require(IERC20Min(c.assets[i]).approve(address(POOL), due), "approve");
+            c.assets[i].forceApprove(address(POOL), due);
         }
         return true;
     }
 
     /// @dev Memory-args mirror of CowWrapper._next (the continuation crosses the Aave callback boundary).
+    ///      The terminal hop is constrained to the settle() selector ("only settle() is allowed").
     function _nextMem(bytes memory settleData, bytes memory remaining) internal {
         if (remaining.length == 0) {
             require(settleData.length >= 4 && bytes4(_first4(settleData)) == ICowSettlement.settle.selector,

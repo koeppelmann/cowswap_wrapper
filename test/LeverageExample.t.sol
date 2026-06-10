@@ -6,7 +6,7 @@ import {CoWSafeWrapper} from "../src/CoWSafeWrapper.sol";
 import {CoWSafeSigHandler} from "../src/CoWSafeSigHandler.sol";
 import {CowFlashLoanWrapper, IAavePoolFL} from "../src/CowFlashLoanWrapper.sol";
 import {SafeModuleSetup} from "./helpers/SafeModuleSetup.sol";
-import {ICowSettlement} from "../src/CowWrapper.sol";
+import {ICowSettlement, ICowWrapper} from "../src/CowWrapper.sol";
 
 /*
  * MODEL A e2e: GENERIC double-wrapper leverage on a Gnosis shadow-fork.
@@ -177,11 +177,10 @@ contract LeverageExampleTest is Test {
 
     /// chainedWrapperData for flashWrapper(first) → safeWrapper(final):
     /// [len_fl][abi.encode(Loan[])] [addr safeWrapper] [len_safe][abi.encode(OrderExec[])]
-    function _chain(CowFlashLoanWrapper.Loan[] memory loans, CoWSafeWrapper.OrderExec[] memory ex, bytes memory uid)
+    function _chain(CowFlashLoanWrapper.Loan[] memory loans, CoWSafeWrapper.OrderExec[] memory ex)
         internal view returns (bytes memory)
     {
-        bytes[] memory uids = new bytes[](1); uids[0] = uid; // flash wrapper proves this order settled
-        bytes memory flData = abi.encode(loans, uids);
+        bytes memory flData = abi.encode(loans); // order uids derived from settleData by the flash wrapper
         bytes memory safeData = abi.encode(ex);
         return bytes.concat(
             bytes2(uint16(flData.length)), flData,
@@ -228,7 +227,7 @@ contract LeverageExampleTest is Test {
         _registerOpen(1);
         deal(WETH, SETTLEMENT, BUY_WETH); // buffer liquidity for the buy side
         (CoWSafeWrapper.SafeTx memory pre, CoWSafeWrapper.SafeTx memory post) = _openTxs();
-        bytes memory chain = _chain(_loan1(WXDAI, FLASH, safe), _exec1(1, pre, post), _uid(safe, WXDAI, WETH, FLASH, BUY_WETH));
+        bytes memory chain = _chain(_loan1(WXDAI, FLASH, safe), _exec1(1, pre, post));
         vm.prank(solver);
         uint256 g = gasleft();
         flashWrapper.wrappedSettle(_settleCd(WXDAI, WETH, FLASH, BUY_WETH), chain);
@@ -280,7 +279,7 @@ contract LeverageExampleTest is Test {
         safeWrapper.registerMetaOrder(2, m);
 
         deal(WXDAI, SETTLEMENT, CBUY_WXDAI); // buffer liquidity for the buy side
-        bytes memory chain = _chain(_loan1(WXDAI, CFLASH, safe), _exec1(2, pre, post), _uid(safe, WETH, WXDAI, SELL_WETH, CBUY_WXDAI));
+        bytes memory chain = _chain(_loan1(WXDAI, CFLASH, safe), _exec1(2, pre, post));
         vm.prank(solver);
         uint256 g = gasleft();
         flashWrapper.wrappedSettle(_settleCd(WETH, WXDAI, SELL_WETH, CBUY_WXDAI), chain);
@@ -329,7 +328,7 @@ contract LeverageExampleTest is Test {
         (CoWSafeWrapper.SafeTx memory pre, ) = _openTxs();
         // tampered post: send the repay to the ATTACKER instead of the flash wrapper
         CoWSafeWrapper.SafeTx memory evil = CoWSafeWrapper.SafeTx({ to: WXDAI, value: 0, data: abi.encodeWithSelector(IERC20.transfer.selector, address(0xBAD), REPAY), operation: 0 });
-        bytes memory chain = _chain(_loan1(WXDAI, FLASH, safe), _exec1(1, pre, evil), _uid(safe, WXDAI, WETH, FLASH, BUY_WETH));
+        bytes memory chain = _chain(_loan1(WXDAI, FLASH, safe), _exec1(1, pre, evil));
         vm.prank(solver);
         vm.expectRevert(bytes("post mismatch")); // hash check inside CoWSafeWrapper → whole chain reverts
         flashWrapper.wrappedSettle(_settleCd(WXDAI, WETH, FLASH, BUY_WETH), chain);
@@ -341,35 +340,32 @@ contract LeverageExampleTest is Test {
         deal(WETH, SETTLEMENT, BUY_WETH);
         (CoWSafeWrapper.SafeTx memory pre, CoWSafeWrapper.SafeTx memory post) = _openTxs();
         // loan goes to 0xBAD instead of the safe: safe can't sell (no WXDAI beyond equity) → settle reverts
-        bytes memory chain = _chain(_loan1(WXDAI, FLASH, address(0xBAD)), _exec1(1, pre, post), _uid(safe, WXDAI, WETH, FLASH, BUY_WETH));
+        bytes memory chain = _chain(_loan1(WXDAI, FLASH, address(0xBAD)), _exec1(1, pre, post));
         vm.prank(solver);
         vm.expectRevert();
         flashWrapper.wrappedSettle(_settleCd(WXDAI, WETH, FLASH, BUY_WETH), chain);
     }
 
-    /// fill-proof: a chain that returns the magic value WITHOUT settling the declared order must revert.
-    /// FakeWrapper repays the flash from its own funds and returns the wrapper magic value — but never settles.
-    function test_reject_fakeDownstream_noSettle() public {
-        _registerOpen(1);
+    /// Design note: the flash layer is a GENERIC liquidity primitive and deliberately does NOT verify
+    /// that the downstream filled any order — fill-correctness is enforced by CoWSafeWrapper
+    /// (filledAmount >= expectedFill). A downstream that repays the loan and returns the magic value
+    /// therefore succeeds AT THE FLASH LAYER; it simply can't fake a fill on a user's Safe order.
+    function test_flashLayer_doesNotEnforceFill() public {
         FakeWrapper fake = new FakeWrapper(WXDAI, address(flashWrapper));
-        deal(WXDAI, address(fake), REPAY); // fake can fully repay → only the fill-proof can catch it
-        bytes memory uid = _uid(safe, WXDAI, WETH, FLASH, BUY_WETH);
-        bytes[] memory uids = new bytes[](1); uids[0] = uid;
-        bytes memory flData = abi.encode(_loan1(WXDAI, FLASH, address(fake)), uids);
+        deal(WXDAI, address(fake), REPAY); // fake repays loan+premium from its own funds
+        bytes memory flData = abi.encode(_loan1(WXDAI, FLASH, address(fake)));
         bytes memory chain = bytes.concat(bytes2(uint16(flData.length)), flData, bytes20(address(fake)), bytes2(uint16(0)));
         vm.prank(solver);
-        vm.expectRevert(bytes("no settle")); // order never filled → proof-of-settle fails
-        flashWrapper.wrappedSettle(_settleCd(WXDAI, WETH, FLASH, BUY_WETH), chain);
+        bytes4 ret = flashWrapper.wrappedSettle(_settleCd(WXDAI, WETH, FLASH, BUY_WETH), chain);
+        assertEq(ret, ICowWrapper.wrappedSettle.selector, "flash layer succeeds; fill is CoWSafeWrapper's job");
     }
 }
 
-/// A "wrapper" that returns the magic value without doing anything (and repays the loan from its own
-/// balance) — the classic fake-success attacker the fill-proof must defeat.
+/// A "wrapper" that returns the magic value and repays the loan from its own balance without settling.
 contract FakeWrapper {
     address immutable token; address immutable flashWrapper;
     constructor(address t, address fw) { token = t; flashWrapper = fw; }
     function wrappedSettle(bytes calldata, bytes calldata) external returns (bytes4) {
-        // route loan+premium back to the flash wrapper so repayment succeeds — yet nothing settled
         IERC20(token).transfer(flashWrapper, IERC20(token).balanceOf(address(this)));
         return this.wrappedSettle.selector; // same selector as ICowWrapper.wrappedSettle → passes the magic check
     }
