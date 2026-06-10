@@ -2,6 +2,8 @@
 pragma solidity 0.8.34;
 
 import {CowWrapper, ICowSettlement, ICowWrapper} from "./CowWrapper.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /*
  * CowFlashLoanWrapper — a flash-loan layer for CoW wrapper chains.
@@ -41,43 +43,11 @@ interface IAavePoolFL {
         uint256[] calldata interestRateModes, address onBehalfOf, bytes calldata params, uint16 referralCode
     ) external;
 }
-interface IERC20Min {
-    function transfer(address to, uint256 amount) external returns (bool);
-    function approve(address spender, uint256 amount) external returns (bool);
-    function balanceOf(address account) external view returns (uint256);
-}
-
-/// @dev Minimal SafeERC20: tolerates non-standard tokens that return no data (e.g. USDT) and treats a
-///      `false` return or revert as failure. `forceApprove` resets to 0 first for tokens that disallow a
-///      non-zero→non-zero allowance change. A no-data success is accepted only from an address that has
-///      code (a call to an EOA/destroyed address "succeeds" with empty returndata and must not pass).
-///      Avoids pulling in an external dependency.
-library SafeTransfer {
-    function safeTransfer(address token, address to, uint256 amount) internal {
-        _call(token, abi.encodeWithSelector(IERC20Min.transfer.selector, to, amount), "transfer");
-    }
-    function forceApprove(address token, address spender, uint256 amount) internal {
-        if (!_tryApprove(token, spender, amount)) {
-            _call(token, abi.encodeWithSelector(IERC20Min.approve.selector, spender, uint256(0)), "approve reset");
-            _call(token, abi.encodeWithSelector(IERC20Min.approve.selector, spender, amount), "approve");
-        }
-    }
-    function _tryApprove(address token, address spender, uint256 amount) private returns (bool) {
-        (bool ok, bytes memory ret) =
-            token.call(abi.encodeWithSelector(IERC20Min.approve.selector, spender, amount));
-        return ok && _returnedTrue(token, ret);
-    }
-    function _call(address token, bytes memory data, string memory err) private {
-        (bool ok, bytes memory ret) = token.call(data);
-        require(ok && _returnedTrue(token, ret), err);
-    }
-    function _returnedTrue(address token, bytes memory ret) private view returns (bool) {
-        return ret.length == 0 ? token.code.length > 0 : abi.decode(ret, (bool));
-    }
-}
+// vendored standard implementation: OpenZeppelin v5.5.0 SafeERC20 (USDT-style no-return-data tokens,
+// forceApprove for approve-from-nonzero restrictions, empty returndata accepted only from contracts)
 
 contract CowFlashLoanWrapper is CowWrapper {
-    using SafeTransfer for address;
+    using SafeERC20 for IERC20;
 
     uint256 internal constant MAX_LOANS = 8;
 
@@ -172,7 +142,7 @@ contract CowFlashLoanWrapper is CowWrapper {
 
         // deliver the borrowed liquidity to each committed recipient
         for (uint256 i = 0; i < c.assets.length; i++) {
-            c.assets[i].safeTransfer(c.recipients[i], c.amounts[i]);
+            IERC20(c.assets[i]).safeTransfer(c.recipients[i], c.amounts[i]);
         }
 
         // run the rest of the wrapper chain (→ … → GPv2Settlement.settle) inside the loan window
@@ -181,8 +151,8 @@ contract CowFlashLoanWrapper is CowWrapper {
         // repay: the chain must have routed amount+premium back to us; Aave pulls via this allowance.
         for (uint256 i = 0; i < c.assets.length; i++) {
             uint256 due = c.amounts[i] + premiums[i];
-            require(IERC20Min(c.assets[i]).balanceOf(address(this)) >= due, "underfunded");
-            c.assets[i].forceApprove(address(POOL), due);
+            require(IERC20(c.assets[i]).balanceOf(address(this)) >= due, "underfunded");
+            IERC20(c.assets[i]).forceApprove(address(POOL), due);
         }
         return true;
     }

@@ -67,10 +67,11 @@ partial state is ever observable.
 
 ## Known assumptions / limitations
 
-- **ERC-20 compatibility.** Delivery and repayment go through an internal `SafeTransfer` library
-  (`safeTransfer` / `forceApprove`) that tolerates non-standard tokens which return no data (e.g. USDT)
-  and resets a non-zero allowance to 0 before re-approving. Fee-on-transfer and rebasing tokens remain
-  out of scope (the loan-accounting assumes the delivered/repaid amount equals the requested amount).
+- **ERC-20 compatibility.** Delivery and repayment go through OpenZeppelin v5.5.0 `SafeERC20`
+  (`safeTransfer` / `forceApprove`, vendored as a pinned submodule): non-standard tokens that return no
+  data (e.g. USDT) and approve-from-nonzero restrictions are handled, and a no-data success is only
+  accepted from an address with code. Fee-on-transfer and rebasing tokens remain out of scope (the
+  loan-accounting assumes the delivered/repaid amount equals the requested amount).
 - **Canonical Aave pool / CoW settlement.** The immutable `POOL` and `SETTLEMENT` addresses are assumed
   canonical. The flash wrapper's trampoline binding means even a misbehaving pool cannot substitute the
   settle calldata or redirect delivery (the callback `params` are hash-checked), but a maliciously-upgraded

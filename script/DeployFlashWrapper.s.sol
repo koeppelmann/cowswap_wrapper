@@ -14,7 +14,7 @@ contract DeployFlashWrapper is Script {
     address constant FACTORY    = 0x4e59b44847b379578588920cA78FbF26c0B4956C; // Arachnid CREATE2
     address constant SETTLEMENT = 0xf553d092b50bdcbddeD1A99aF2cA29FBE5E2CB13; // Gnosis staging/barn
     address constant POOL       = 0xb50201558B00496A145fE76f7424749556E326D8; // Aave V3
-    bytes32 constant SALT       = bytes32(bytes("CowFlashLoanWrapper.v5"));    // ascii, right-padded
+    bytes32 constant SALT       = bytes32(bytes("CowFlashLoanWrapper.v6"));    // ascii, right-padded
 
     function _initcode() internal pure returns (bytes memory) {
         return abi.encodePacked(

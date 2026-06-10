@@ -6,7 +6,7 @@ address is a pure function of `(creation bytecode, constructor args, salt)`, so 
 settings reproduce the same address on any network.
 
 - Compiler: solc **0.8.34**, optimizer **200 runs**, `evm_version = cancun` (EIP-1153 transient storage).
-- Salts (ascii): `CoWSafeWrapper.v3`, `CoWSafeSigHandler.v3`, `CowFlashLoanWrapper.v5`.
+- Salts (ascii): `CoWSafeWrapper.v3`, `CoWSafeSigHandler.v3`, `CowFlashLoanWrapper.v6`.
 - Constructors: `CoWSafeWrapper(ICowSettlement settlement)`, `CoWSafeSigHandler(address wrapper, address
   settlement)`, `CowFlashLoanWrapper(ICowSettlement settlement, IAavePool pool)`.
 
@@ -19,7 +19,7 @@ production allowlisting. All three are **verified on Sourcify (exact match)**.
 |---|---|
 | **CoWSafeWrapper** | [`0x531636e6e18F3A52c283aCCda39D7185E4597A37`](https://gnosisscan.io/address/0x531636e6e18F3A52c283aCCda39D7185E4597A37) |
 | **CoWSafeSigHandler** | [`0x29619484de063A3E06e432a0CCBF5a2BE6F024DC`](https://gnosisscan.io/address/0x29619484de063A3E06e432a0CCBF5a2BE6F024DC) |
-| **CowFlashLoanWrapper** | [`0xfe983Ae3837d4cC3ae1d4F18283e80083612E4CD`](https://gnosisscan.io/address/0xfe983Ae3837d4cC3ae1d4F18283e80083612E4CD) |
+| **CowFlashLoanWrapper** | [`0x2E3fdEe28D7224ED140B4ea08C57F47546679363`](https://gnosisscan.io/address/0x2E3fdEe28D7224ED140B4ea08C57F47546679363) |
 
 External addresses used:
 - CoW staging settlement: `0xf553d092b50bdcbddeD1A99aF2cA29FBE5E2CB13` (authenticator `0x02073540567FA1EABcBf74C2F7E6F9029ca7d800`, vaultRelayer `0xC7242d167563352E2BCA4d71C043fbe542DB8FB2`)
@@ -28,7 +28,7 @@ External addresses used:
 
 ### `CowFlashLoanWrapper` changelog (addresses the review issues #1–#4)
 
-`v5` (`0xfe983Ae3837d4cC3ae1d4F18283e80083612E4CD`, salt `CowFlashLoanWrapper.v5`) is the current build.
+`v6` (`0x2E3fdEe28D7224ED140B4ea08C57F47546679363`, salt `CowFlashLoanWrapper.v6`) is the current build.
 Versus the first published build it:
 - **drops the solver-supplied `uids` / `filledAmount` proof-of-settle** (issues #1, #4) — `wrapperData =
   abi.encode(Loan[])` only; this also removes the INT_MAX-after-`invalidateOrder` false positive and lets
@@ -39,13 +39,15 @@ Versus the first published build it:
   storage; `executeOperation` reverts `ParamsTampered` unless the callback `params` hash matches, so the
   pool can't alter the settlement data while it round-trips through the flash callback (mirrors CoW's
   FlashLoanRouter `pendingDataHash`);
-- **routes all token moves through `SafeTransfer`** (issue #2) — `safeTransfer` / `forceApprove` tolerate
-  no-data tokens (USDT) and non-zero→non-zero approval restrictions; a no-data success is accepted only
-  from an address with code (an EOA/destroyed "token" cannot silently pass).
+- **routes all token moves through OpenZeppelin v5.5.0 `SafeERC20`** (issue #2) — vendored as a pinned
+  submodule (`lib/openzeppelin-contracts` @ v5.5.0), per review feedback to use the standard
+  implementation rather than an inlined one. `safeTransfer` / `forceApprove` handle no-data tokens
+  (USDT), approve-from-nonzero restrictions, and only accept a no-data success from an address with code.
 
-Superseded staging flash wrappers (do not use): `0x1Dc6…106f` (v4, SafeTransfer without the code-length
-check), `0x8dC8…a888` (v3, trampoline, pre-SafeERC20), `0x4502…6B9f` (interim, twap-built — metadata
-didn't match this source), `0x7aC5…785d` (original proof-of-settle build).
+Superseded staging flash wrappers (do not use): `0xfe98…E4CD` (v5, hand-rolled SafeTransfer instead of
+the vendored standard), `0x1Dc6…106f` (v4, SafeTransfer without the code-length check), `0x8dC8…a888`
+(v3, trampoline, pre-SafeERC20), `0x4502…6B9f` (interim, twap-built — metadata didn't match this
+source), `0x7aC5…785d` (original proof-of-settle build).
 
 ## Production cross-network anchors (not yet deployed)
 
@@ -56,7 +58,7 @@ CoW chain (the flash-wrapper anchor additionally assumes the Aave pool address m
 |---|---|
 | CoWSafeWrapper | `0x80e6793ae895a5a735A1943B36C56baBdFD217e0` |
 | CoWSafeSigHandler | `0x36d2BDc057E360C700CF52cF54008A1C192dC0A2` |
-| CowFlashLoanWrapper | `0xa7C601eA803012b299FC5e73B643aEC83F79caC2` |
+| CowFlashLoanWrapper | `0x02a80029E730937d35CE97D240E19C957E82E7d9` |
 
 ## Going to production
 
@@ -71,6 +73,6 @@ is lighter than the production CIP.
 forge build
 # init code hash = keccak(creationCode ++ abi.encode(args)); address = create2(FACTORY, salt, initCodeHash)
 cast create2 --deployer 0x4e59b44847b379578588920cA78FbF26c0B4956C \
-  --salt $(cast format-bytes32-string "CowFlashLoanWrapper.v5") \
+  --salt $(cast format-bytes32-string "CowFlashLoanWrapper.v6") \
   --init-code-hash <keccak of creationCode ++ abi.encode(settlement, pool)>
 ```
