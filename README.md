@@ -6,7 +6,7 @@ wrap `GPv2Settlement.settle` and *enforce* logic around a swap that ordinary hoo
 | Contract | What it does |
 |---|---|
 | **`CoWSafeWrapper`** | Lets a [Safe](https://safe.global) attach an **enforced pre-transaction and post-transaction** to one of its CoW orders. The order can only settle if the Safe's own, pre-committed pre/post run around it — atomically, or not at all. |
-| **`CowFlashLoanWrapper`** | Wraps any downstream wrapper chain in an **Aave V3 flash loan**, so the borrowed liquidity is available *during* the settlement. It only succeeds if a real settlement of the declared order(s) actually happened. |
+| **`CowFlashLoanWrapper`** | Wraps any downstream wrapper chain in an **Aave V3 flash loan**, so the borrowed liquidity is available *during* the settlement. A transient hash commitment (trampoline) guarantees the settlement can only run with the exact bytes the solver passed in — the pool cannot tamper with the data in flight. |
 
 They are standard [`ICowWrapper`](src/CowWrapper.sol)s and **compose**: chain
 `CowFlashLoanWrapper → CoWSafeWrapper → settle` and you get flash-loan-powered, atomically-enforced
@@ -44,8 +44,11 @@ fallback handler, **`CoWSafeSigHandler`**, answers the order's EIP-1271 check.
 handler.
 
 **Per action:**
-1. Build a CoW order whose `appData` embeds `{wrapper, safe, nonce, preTx, postTx}` — so the order UID
-   commits to the whole bundle.
+1. Build a CoW order whose `appData` carries the wrapper chain in CoW's native **`metadata.wrappers`**
+   field — `[{address: wrapper, data}, …]` with the exact `OrderExec[]` (safe, nonce, full pre/post
+   calldata) as `data`. The order UID commits to it, the orderbook serves it, and CoW's driver encodes
+   the solver's `wrappedSettle` call from it **verbatim** — so any wrapper-aware solver can fill the
+   order with zero custom integration.
 2. The Safe calls `registerMetaOrder(nonce, {uid, expectedFill, preHash, postHash, notBefore, deadline})`
    — a **direct Safe call** (msg.sender == the Safe), storing only the **hashes** of the pre/post txs.
 
@@ -79,19 +82,23 @@ Placed **first** in a chain, it takes an Aave V3 flash loan, delivers it to the 
 runs the rest of the chain (→ `CoWSafeWrapper` → `settle`) **inside the loan window**, then repays from
 its own balance when the chain returns. See [docs/cowflashwrapper-entry.svg](docs/cowflashwrapper-entry.svg).
 
-`wrapperData = abi.encode(Loan[] loans, bytes[] uids)`:
-- `loans` — which tokens/amounts to flash-borrow and where to deliver them;
-- `uids` — the CoW order UID(s) this settlement **must fill**.
+`wrapperData = abi.encode(Loan[] loans)` — which tokens/amounts to flash-borrow and where to deliver
+them. Nothing else: keeping it free of order UIDs makes it fully deterministic, so it can sit **complete
+and final** in the order's appData `metadata.wrappers` (a UID can't embed itself — it commits to the
+appData).
 
-**Success ⇒ real settlement.** The wrapper snapshots each declared order's `filledAmount` before the
-loan and requires it to **strictly increase** afterward. Only `settle` can move `filledAmount`, so a fake
-downstream wrapper (returning the magic value without settling), a pool that skips the callback, or a
-pool that substitutes the chain all fail this check and revert. The flash loan is otherwise self-securing:
-it has **no owner, no registry, holds no funds between transactions** — a loan that can't be repaid simply
-reverts the whole transaction.
+**Trampoline data integrity.** Before borrowing, `_wrap` commits `keccak256` of the full context (settle
+calldata + the rest of the chain + the delivery plan) to transient storage; the Aave callback re-hashes
+the `params` it is handed and reverts (`ParamsTampered`) on any mismatch — mirroring CoW's audited
+`FlashLoanRouter`. So even a malicious/upgraded pool cannot substitute the settlement or redirect
+delivery. The flash layer deliberately does **not** verify fills (that's `CoWSafeWrapper`'s job —
+`filledAmount ≥ expectedFill`); it is otherwise self-securing: **no owner, no registry, holds no funds
+between transactions** — a loan that can't be repaid simply reverts the whole transaction. Token moves go
+through OpenZeppelin v5.5.0 `SafeERC20` (vendored), so USDT-style tokens work.
 
 **Callback safety:** `executeOperation` requires `msg.sender == Pool`, `initiator == this` (so a
-third-party-initiated loan with this contract as receiver reverts), and an in-flight transient flag.
+third-party-initiated loan with this contract as receiver reverts), the in-flight transient flag, and the
+trampoline hash match.
 
 ---
 
@@ -99,14 +106,14 @@ third-party-initiated loan with this contract as receiver reverts), and an in-fl
 
 ```
 solver
-└─ CowFlashLoanWrapper.wrappedSettle(settleData, chain)        # chain = [Loan[]++uids][CoWSafeWrapper][OrderExec[]]
+└─ CowFlashLoanWrapper.wrappedSettle(settleData, chain)        # chain = [Loan[]][CoWSafeWrapper][OrderExec[]]
    └─ Aave flashLoan → executeOperation                         # the loan window
         ├─ deliver borrowed tokens to the Safe
         ├─ CoWSafeWrapper.wrappedSettle(settleData, OrderExec[])
         │    ├─ verify hashes · freeze · run PRE as the Safe
         │    ├─ bless · GPv2Settlement.settle(settleData) · prove fill
         │    └─ run POST as the Safe   (routes loan+premium back to the flash wrapper)
-        └─ require declared order filled · approve repayment
+        └─ require loan+premium routed back · approve repayment
    Aave pulls loan + premium
 ```
 
@@ -117,8 +124,8 @@ solver
 - *Close:* the **pre** repays debt + withdraws collateral, the order sells collateral for the debt token,
   the **post** repays the flash and the equity remains in the Safe.
 
-Both directions, plus the adversarial negatives (fake downstream, unrepaid loan, third-party callback,
-tampered post, direct-settle bypass), run green against real Aave V3 + real `GPv2Settlement`.
+Both directions, plus the adversarial negatives (unrepaid loan, third-party callback, tampered post,
+direct-settle bypass, direct `executeOperation`), run green against real Aave V3 + real `GPv2Settlement`.
 
 ---
 
@@ -141,7 +148,7 @@ src/
   CowWrapper.sol          # CoW DAO base (vendored): solver auth, chaining, magic value
   CoWSafeWrapper.sol      # enforced Safe pre/post meta-orders
   CoWSafeSigHandler.sol   # Safe fallback handler — EIP-1271 for CoWSafeWrapper
-  CowFlashLoanWrapper.sol # Aave V3 flash-loan layer, gated on real settlement
+  CowFlashLoanWrapper.sol # Aave V3 flash-loan layer (trampoline-committed callback)
 test/
   CoWSafeWrapper.t.sol    # the meta-order wrapper, standalone
   LeverageExample.t.sol   # both wrappers composed → leverage open/close (the example)

@@ -11,8 +11,8 @@
 - **Solvers** are CoW-allowlisted; they can *execute* a registered action but can never invent, alter,
   redirect, or skip it. The worst a solver can do is decline to execute (or cause a revert).
 - **The settlement** is CoW's canonical `GPv2Settlement`; the **Aave Pool** is canonical and immutable
-  in the deployment. Both are trusted as in any integration; the flash wrapper additionally requires a
-  *real settlement* to have occurred (below), so it does not over-rely on the pool.
+  in the deployment. Both are trusted as in any integration; the flash wrapper additionally hash-commits
+  its callback context (trampoline, below), so it does not rely on the pool passing data through honestly.
 
 Everything happens in one transaction and is **all-or-nothing**: any failure — hash mismatch, pre/post
 revert, signature invalid, order not filled, loan not repaid — reverts the entire transaction. No

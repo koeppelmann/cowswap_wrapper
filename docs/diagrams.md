@@ -9,9 +9,9 @@ execution (verify hashes → freeze → PRE → bless → settle → EIP-1271 vi
 
 ## `CowFlashLoanWrapper` — the solver's entry transaction
 
-The outer entry point and how the chain nests: solver → flash wrapper → Aave `flashLoan` →
-`executeOperation` (deliver loan → hand off to `CoWSafeWrapper` → … → `settle`) → repay. Ends at the
-hand-off where the diagram above takes over; closes with the proof-of-settle check.
+The outer entry point and how the chain nests: solver → flash wrapper (trampoline-commits the context)
+→ Aave `flashLoan` → `executeOperation` (hash-check params → deliver loan → hand off to `CoWSafeWrapper`
+→ … → `settle`) → repay. Ends at the hand-off where the diagram above takes over.
 
 ![CowFlashLoanWrapper entry](./cowflashwrapper-entry.png)
 

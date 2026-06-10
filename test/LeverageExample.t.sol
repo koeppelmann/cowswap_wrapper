@@ -180,7 +180,7 @@ contract LeverageExampleTest is Test {
     function _chain(CowFlashLoanWrapper.Loan[] memory loans, CoWSafeWrapper.OrderExec[] memory ex)
         internal view returns (bytes memory)
     {
-        bytes memory flData = abi.encode(loans); // order uids derived from settleData by the flash wrapper
+        bytes memory flData = abi.encode(loans); // Loan[] only — fill enforcement lives in CoWSafeWrapper
         bytes memory safeData = abi.encode(ex);
         return bytes.concat(
             bytes2(uint16(flData.length)), flData,

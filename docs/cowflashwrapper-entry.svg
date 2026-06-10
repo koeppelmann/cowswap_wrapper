@@ -70,12 +70,12 @@
     <!-- 2 self: parse chain -->
     <path d="M 376 360 h 64 v 26 h -64" fill="none" stroke="#334155" stroke-width="1.6" marker-end="url(#arr)"/>
     <text x="450" y="370"><tspan font-weight="700">2</tspan>  base slices the chain: this wrapper's data = <tspan font-family="ui-monospace,Menlo,monospace" font-size="11.5">Loan[]</tspan> · remaining = <tspan font-family="ui-monospace,Menlo,monospace" font-size="11.5">[CoWSafeWrapper ++ OrderExec[]]</tspan></text>
-    <text x="450" y="386" font-size="11.5" fill="#334155">_wrap: decode loans (≤8, no dup tokens) · snapshot own balances (<tspan font-family="ui-monospace,Menlo,monospace" font-size="11">ownBefore</tspan>) · <tspan font-family="ui-monospace,Menlo,monospace" font-size="11">T_FL := 1</tspan></text>
+    <text x="450" y="386" font-size="11.5" fill="#334155">_wrap: decode loans (≤8, no dup tokens) · commit <tspan font-family="ui-monospace,Menlo,monospace" font-size="11">T_COMMIT := keccak(ctx)</tspan> · <tspan font-family="ui-monospace,Menlo,monospace" font-size="11">T_FL := 1</tspan></text>
 
     <!-- 3 flashwrapper -> pool flashLoan -->
     <line x1="376" y1="430" x2="652" y2="430" stroke="#334155" stroke-width="1.6" marker-end="url(#arr)"/>
     <text x="386" y="422"><tspan font-weight="700">3</tspan>  <tspan font-family="ui-monospace,Menlo,monospace" font-size="11.5">flashLoan(receiver=this, [WXDAI], [200], modes=0, params)</tspan></text>
-    <text x="386" y="446" font-size="11" fill="#64748b">params = FlashCtx{ settleData, remaining, recipients, ownBefore } — the continuation, smuggled through Aave</text>
+    <text x="386" y="446" font-size="11" fill="#64748b">params = FlashCtx{ settleData, remaining, assets, amounts, recipients } — the continuation, hash-committed (trampoline)</text>
 
     <!-- 4 pool -> wrapper: loan tokens -->
     <line x1="652" y1="490" x2="378" y2="490" stroke="#0e9f6e" stroke-width="1.8" marker-end="url(#arrTok)"/>
@@ -84,7 +84,7 @@
     <!-- 5 pool -> wrapper executeOperation -->
     <line x1="652" y1="538" x2="378" y2="538" stroke="#334155" stroke-width="1.6" marker-end="url(#arr)"/>
     <text x="395" y="530"><tspan font-weight="700">5</tspan>  <tspan font-family="ui-monospace,Menlo,monospace" font-size="11.5">executeOperation(assets, amounts, premiums, initiator, params)</tspan></text>
-    <text x="395" y="554" font-size="11" fill="#64748b">gates: msg.sender == POOL · initiator == this (no third-party-initiated loans) · T_FL == 1</text>
+    <text x="395" y="554" font-size="11" fill="#64748b">gates: msg.sender == POOL · initiator == this · T_FL == 1 · keccak(params) == T_COMMIT (ParamsTampered)</text>
 
     <!-- 6 wrapper -> safe: deliver loan -->
     <line x1="378" y1="600" x2="892" y2="600" stroke="#0e9f6e" stroke-width="1.8" marker-end="url(#arrTok)"/>
@@ -100,7 +100,7 @@
     <text x="1125" y="710" text-anchor="middle" font-size="11" fill="#475569" font-weight="700">HANDOFF</text>
     <text x="1125" y="726" text-anchor="middle" font-size="10.5" fill="#475569">verify pre/post hashes</text>
     <text x="1125" y="740" text-anchor="middle" font-size="10.5" fill="#475569">PRE → bless → settle →</text>
-    <text x="1125" y="754" text-anchor="middle" font-size="10.5" fill="#475569">fill-proof → POST</text>
+    <text x="1125" y="754" text-anchor="middle" font-size="10.5" fill="#475569">fill-check → POST</text>
     <text x="1125" y="768" text-anchor="middle" font-size="10.5" fill="#475569">(previous diagram, 1–14)</text>
 
     <!-- 8 inner returns -->
@@ -109,7 +109,7 @@
 
     <!-- 9 repay check + approve -->
     <path d="M 376 836 h 64 v 26 h -64" fill="none" stroke="#334155" stroke-width="1.6" marker-end="url(#arr)"/>
-    <text x="450" y="846"><tspan font-weight="700">9</tspan>  require <tspan font-family="ui-monospace,Menlo,monospace" font-size="11.5">balance ≥ ownBefore + 200.1</tspan> (stranded funds never subsidize) · <tspan font-family="ui-monospace,Menlo,monospace" font-size="11.5">approve(POOL, 200.1)</tspan> · return true</text>
+    <text x="450" y="846"><tspan font-weight="700">9</tspan>  require <tspan font-family="ui-monospace,Menlo,monospace" font-size="11.5">balance ≥ 200.1</tspan> · <tspan font-family="ui-monospace,Menlo,monospace" font-size="11.5">forceApprove(POOL, 200.1)</tspan> (OZ SafeERC20) · return true</text>
 
     <!-- 10 pool pulls -->
     <line x1="378" y1="892" x2="652" y2="892" stroke="#0e9f6e" stroke-width="1.8" marker-end="url(#arrTok)"/>
@@ -123,7 +123,7 @@
   <!-- ================== FOOTER ================== -->
   <rect x="40" y="1006" width="1200" height="92" rx="12" fill="#f8fafc" stroke="#e2e8f0"/>
   <g font-size="12" fill="#334155">
-    <text x="60" y="1030"><tspan font-weight="700" fill="#0f172a">The loan window:</tspan> steps 5–9 are ONE call frame — the entire inner settlement (pre, swap, fill-proof, post) executes while the wrapper holds Aave's loan. That is the whole point.</text>
+    <text x="60" y="1030"><tspan font-weight="700" fill="#0f172a">The loan window:</tspan> steps 5–9 are ONE call frame — the entire inner settlement (pre, swap, fill-check, post) executes while the wrapper holds Aave's loan. That is the whole point.</text>
     <text x="60" y="1052"><tspan font-weight="700" fill="#0f172a">No registry, no owner:</tspan> the Loan[] is solver-chosen and unauthorized BY DESIGN — a wrong loan simply isn't repaid in step 9/10 and the entire transaction reverts. Atomic repayment IS the security.</text>
     <text x="60" y="1074"><tspan font-weight="700" fill="#0f172a">Two allowlist entries:</tspan> the settlement checks isSolver(CoWSafeWrapper); this wrapper checks isSolver(solver); CoWSafeWrapper checks isSolver(CowFlashLoanWrapper) — every hop is gated by CoW's own allowlist.</text>
   </g>
