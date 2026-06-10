@@ -49,7 +49,9 @@ interface IERC20Min {
 
 /// @dev Minimal SafeERC20: tolerates non-standard tokens that return no data (e.g. USDT) and treats a
 ///      `false` return or revert as failure. `forceApprove` resets to 0 first for tokens that disallow a
-///      non-zero→non-zero allowance change. Avoids pulling in an external dependency.
+///      non-zero→non-zero allowance change. A no-data success is accepted only from an address that has
+///      code (a call to an EOA/destroyed address "succeeds" with empty returndata and must not pass).
+///      Avoids pulling in an external dependency.
 library SafeTransfer {
     function safeTransfer(address token, address to, uint256 amount) internal {
         _call(token, abi.encodeWithSelector(IERC20Min.transfer.selector, to, amount), "transfer");
@@ -63,11 +65,14 @@ library SafeTransfer {
     function _tryApprove(address token, address spender, uint256 amount) private returns (bool) {
         (bool ok, bytes memory ret) =
             token.call(abi.encodeWithSelector(IERC20Min.approve.selector, spender, amount));
-        return ok && (ret.length == 0 || abi.decode(ret, (bool)));
+        return ok && _returnedTrue(token, ret);
     }
     function _call(address token, bytes memory data, string memory err) private {
         (bool ok, bytes memory ret) = token.call(data);
-        require(ok && (ret.length == 0 || abi.decode(ret, (bool))), err);
+        require(ok && _returnedTrue(token, ret), err);
+    }
+    function _returnedTrue(address token, bytes memory ret) private view returns (bool) {
+        return ret.length == 0 ? token.code.length > 0 : abi.decode(ret, (bool));
     }
 }
 
