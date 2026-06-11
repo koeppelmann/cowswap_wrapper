@@ -29,6 +29,13 @@ partial state is ever observable.
 3. **No bypass.** The order's EIP-1271 signature returns valid **only** while a transient "bless" flag is
    set — which happens only inside this wrapper's own settlement, between running `pre` and calling
    `settle`. Outside that window the order is unsettleable; a direct `settle` of it reverts.
+   The optional `CoWSafeSigHandlerSim` handler adds ONE exception that is unreachable on-chain: when
+   `tx.gasprice == 0` (an `eth_call`-style simulation — every real transaction pays a nonzero effective
+   gas price) it answers valid without the bless check, so orders can be submitted to the orderbook as
+   native `eip1271` instead of presign. Trade-off: it assumes no block producer crafts a 0-gas-price
+   settlement in collusion with an allowlisted solver; use the strict `CoWSafeSigHandler` where that
+   assumption is unacceptable. (Presign has its own bypass surface: a presigned order is valid
+   standalone, without the wrapper, if the Safe happens to hold the sell tokens with an approval.)
 4. **Proof of fill.** After `settle`, the wrapper requires `filledAmount(uid) ≥ expectedFill`. A solver
    that runs `pre` but omits the trade reverts everything.
 5. **One-shot.** A registration is frozen (consumed) before any side effect and cannot be replayed.

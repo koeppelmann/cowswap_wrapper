@@ -148,9 +148,11 @@ src/
   CowWrapper.sol          # CoW DAO base (vendored): solver auth, chaining, magic value
   CoWSafeWrapper.sol      # enforced Safe pre/post meta-orders
   CoWSafeSigHandler.sol   # Safe fallback handler — EIP-1271 for CoWSafeWrapper
+  CoWSafeSigHandlerSim.sol# handler variant: +simulation-only validity (tx.gasprice == 0) → native eip1271 submission
   CowFlashLoanWrapper.sol # Aave V3 flash-loan layer (trampoline-committed callback)
 test/
   CoWSafeWrapper.t.sol    # the meta-order wrapper, standalone
+  CoWSafeSigHandlerSim.t.sol # unit tests for the simulation-validity branch
   LeverageExample.t.sol   # both wrappers composed → leverage open/close (the example)
   helpers/SafeModuleSetup.sol
 docs/                     # sequence diagrams (svg + png)

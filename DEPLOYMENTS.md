@@ -6,9 +6,11 @@ address is a pure function of `(creation bytecode, constructor args, salt)`, so 
 settings reproduce the same address on any network.
 
 - Compiler: solc **0.8.34**, optimizer **200 runs**, `evm_version = cancun` (EIP-1153 transient storage).
-- Salts (ascii): `CoWSafeWrapper.v3`, `CoWSafeSigHandler.v3`, `CowFlashLoanWrapper.v6`.
+- Salts (ascii): `CoWSafeWrapper.v3`, `CoWSafeSigHandler.v3`, `CowFlashLoanWrapper.v6`,
+  `CoWSafeSigHandlerSim.v1`.
 - Constructors: `CoWSafeWrapper(ICowSettlement settlement)`, `CoWSafeSigHandler(address wrapper, address
-  settlement)`, `CowFlashLoanWrapper(ICowSettlement settlement, IAavePool pool)`.
+  settlement)`, `CowFlashLoanWrapper(ICowSettlement settlement, IAavePool pool)`,
+  `CoWSafeSigHandlerSim(address wrapper, address settlement)`.
 
 ## Gnosis Chain (chain id 100) — CoW **staging** settlement
 
@@ -20,6 +22,16 @@ production allowlisting. All three are **verified on Sourcify (exact match)**.
 | **CoWSafeWrapper** | [`0x531636e6e18F3A52c283aCCda39D7185E4597A37`](https://gnosisscan.io/address/0x531636e6e18F3A52c283aCCda39D7185E4597A37) |
 | **CoWSafeSigHandler** | [`0x29619484de063A3E06e432a0CCBF5a2BE6F024DC`](https://gnosisscan.io/address/0x29619484de063A3E06e432a0CCBF5a2BE6F024DC) |
 | **CowFlashLoanWrapper** | [`0x2E3fdEe28D7224ED140B4ea08C57F47546679363`](https://gnosisscan.io/address/0x2E3fdEe28D7224ED140B4ea08C57F47546679363) |
+| **CoWSafeSigHandlerSim** | [`0xCc9AC16653530C141D946973fcae3d9E3815dE46`](https://gnosisscan.io/address/0xCc9AC16653530C141D946973fcae3d9E3815dE46) |
+
+`CoWSafeSigHandlerSim` is the **simulation-validity** variant of the fallback handler: identical to
+`CoWSafeSigHandler` except that on the CoW settlement path it returns the EIP-1271 magic value when
+`tx.gasprice == 0` (true only in `eth_call`-style simulations, never in a real transaction). This lets
+wrapper orders be submitted to the orderbook with `signingScheme: eip1271` directly — no
+`setPreSignature` step — while on-chain validity remains bless-only. Proven live on Gnosis staging
+2026-06-11: an eip1271 order was accepted by the barn orderbook and organically settled through the
+wrapper (settlement tx
+[`0xcfa258c9…83fc`](https://gnosisscan.io/tx/0xcfa258c90782ae157aa27b0550e7e594e8011d0f57e7a34075246ca386d383fc)).
 
 External addresses used:
 - CoW staging settlement: `0xf553d092b50bdcbddeD1A99aF2cA29FBE5E2CB13` (authenticator `0x02073540567FA1EABcBf74C2F7E6F9029ca7d800`, vaultRelayer `0xC7242d167563352E2BCA4d71C043fbe542DB8FB2`)
